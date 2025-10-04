@@ -1,0 +1,10 @@
+{
+    "author": ["Okkerka"],
+    "name": "TidalPlaylist",
+    "short": "Queue Tidal playlists into Audio cog",
+    "description": "Fetch Tidal playlist tracks and play them via the Audio cog using YouTube search.",
+    "install_msg": "Thanks for installing TidalPlaylist! Use `[p]tidalplaylist <playlist_url>` to queue a playlist.",
+    "requirements": ["tidalapi"],
+    "tags": ["audio", "music", "tidal", "playlist"],
+    "hidden": false
+}
