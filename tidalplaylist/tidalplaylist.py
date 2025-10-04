@@ -6,16 +6,9 @@ import logging
 
 log = logging.getLogger("red.tidalplaylist")
 
-try:
-    import tidalapi
-    TIDALAPI_AVAILABLE = True
-except ImportError:
-    TIDALAPI_AVAILABLE = False
-    log.error("tidalapi not installed")
-
 
 class TidalPlaylist(commands.Cog):
-    """Play Tidal links via the Audio cog."""
+    """Play Tidal links directly via Lavalink with LavaSrc plugin."""
     
     def __init__(self, bot):
         self.bot = bot
@@ -26,112 +19,58 @@ class TidalPlaylist(commands.Cog):
         )
         
         default_global = {
-            "token_type": None,
-            "access_token": None,
-            "refresh_token": None,
-            "expiry_time": None
+            "use_direct_streaming": True,
+            "quiet_mode": True  # New: suppress per-track messages
         }
         self.config.register_global(**default_global)
-        
-        if TIDALAPI_AVAILABLE:
-            self.session = tidalapi.Session()
-            bot.loop.create_task(self.load_session())
-        else:
-            self.session = None
-    
-    async def load_session(self):
-        """Load saved session."""
-        await self.bot.wait_until_ready()
-        
-        try:
-            token_type = await self.config.token_type()
-            access_token = await self.config.access_token()
-            refresh_token = await self.config.refresh_token()
-            expiry_time = await self.config.expiry_time()
-            
-            if token_type and access_token and refresh_token:
-                self.session.load_oauth_session(
-                    token_type=token_type,
-                    access_token=access_token,
-                    refresh_token=refresh_token,
-                    expiry_time=expiry_time
-                )
-                
-                if self.session.check_login():
-                    log.info("Tidal session loaded")
-                else:
-                    log.warning("Tidal session expired")
-            else:
-                log.info("No Tidal credentials found")
-        except Exception as e:
-            log.error(f"Error loading session: {e}")
     
     @commands.is_owner()
     @commands.command()
-    async def tidalsetup(self, ctx):
-        """Set up Tidal OAuth."""
+    async def tidaldirect(self, ctx, enabled: bool = None):
+        """
+        Toggle direct Tidal streaming via Lavalink.
         
-        if not TIDALAPI_AVAILABLE:
-            return await ctx.send(
-                "tidalapi is not installed. Install with: pip install tidalapi"
-            )
+        If enabled, sends Tidal URLs directly to Lavalink (requires LavaSrc plugin).
+        If disabled, falls back to YouTube search.
+        """
+        if enabled is None:
+            current = await self.config.use_direct_streaming()
+            status = "enabled" if current else "disabled"
+            return await ctx.send(f"Direct Tidal streaming is currently **{status}**.")
         
-        await ctx.send("Starting OAuth setup...")
+        await self.config.use_direct_streaming.set(enabled)
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"Direct Tidal streaming has been **{status}**.")
         
-        try:
-            login, future = self.session.login_oauth()
-            
-            embed = discord.Embed(
-                title="Tidal OAuth Setup",
-                description=f"Visit this URL:\n{login.verification_uri_complete}",
-                color=discord.Color.blue()
+        if enabled:
+            await ctx.send(
+                "⚠️ Make sure you have LavaSrc plugin installed on your Lavalink server "
+                "with Tidal configured!"
             )
-            embed.add_field(
-                name="Waiting",
-                value="Timeout in 5 minutes",
-                inline=False
-            )
-            await ctx.send(embed=embed)
-            
-            try:
-                await asyncio.wait_for(
-                    self.bot.loop.run_in_executor(None, future.result),
-                    timeout=300
-                )
-            except asyncio.TimeoutError:
-                return await ctx.send("OAuth timed out")
-            
-            if self.session.check_login():
-                await self.config.token_type.set(self.session.token_type)
-                await self.config.access_token.set(self.session.access_token)
-                await self.config.refresh_token.set(self.session.refresh_token)
-                
-                if hasattr(self.session, 'expiry_time') and self.session.expiry_time:
-                    await self.config.expiry_time.set(
-                        self.session.expiry_time.timestamp()
-                    )
-                
-                await ctx.send("Setup complete!")
-                log.info("OAuth setup completed")
-            else:
-                await ctx.send("Login failed")
-                
-        except Exception as e:
-            await ctx.send(f"Error: {str(e)}")
-            log.error(f"OAuth error: {e}")
+    
+    @commands.is_owner()
+    @commands.command()
+    async def tidalquiet(self, ctx, enabled: bool = None):
+        """
+        Toggle quiet mode (suppress per-track messages).
+        
+        When enabled, only shows summary messages for playlists/albums.
+        """
+        if enabled is None:
+            current = await self.config.quiet_mode()
+            status = "enabled" if current else "disabled"
+            return await ctx.send(f"Quiet mode is currently **{status}**.")
+        
+        await self.config.quiet_mode.set(enabled)
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"Quiet mode has been **{status}**.")
     
     @commands.command()
     async def tidal(self, ctx, url: str):
-        """Queue Tidal playlist, album, or track."""
-        
-        if not TIDALAPI_AVAILABLE:
-            return await ctx.send("tidalapi is not installed")
-        
-        if not self.session.check_login():
-            return await ctx.send(
-                "Not authenticated. Owner needs to run tidalsetup"
-            )
-        
+        """
+        Queue Tidal playlist, album, or track.
+        Example: [p]tidal https://tidal.com/browse/playlist/xxxx
+        """
         audio = self.bot.get_cog("Audio")
         if not audio:
             return await ctx.send("Audio cog not loaded")
@@ -139,135 +78,67 @@ class TidalPlaylist(commands.Cog):
         if not ctx.author.voice:
             return await ctx.send("Join a voice channel first")
         
-        if "playlist/" in url:
-            await self.queue_playlist(ctx, url)
-        elif "album/" in url:
-            await self.queue_album(ctx, url)
-        elif "track/" in url:
-            await self.queue_track(ctx, url)
+        use_direct = await self.config.use_direct_streaming()
+        
+        if use_direct:
+            # Send Tidal URL directly to Lavalink (requires LavaSrc)
+            await self.queue_direct(ctx, url)
         else:
-            await ctx.send("Invalid Tidal URL")
+            await ctx.send("Direct streaming is disabled. Enable with `[p]tidaldirect true`")
     
-    async def queue_playlist(self, ctx, url):
-        """Queue a playlist."""
-        
-        match = re.search(r"playlist/([A-Za-z0-9\-]+)", url)
-        if not match:
-            return await ctx.send("Invalid playlist URL")
-        
-        playlist_id = match.group(1)
-        
+    async def queue_direct(self, ctx, url):
+        """Queue Tidal URL directly via Lavalink."""
         try:
-            playlist = await self.bot.loop.run_in_executor(
-                None,
-                self.session.playlist,
-                playlist_id
-            )
-            
-            tracks = await self.bot.loop.run_in_executor(
-                None,
-                playlist.tracks
-            )
-            
-            total = len(tracks)
-            await ctx.send(f"Queuing {playlist.name} ({total} tracks)...")
-            
-            queued = 0
-            for track in tracks:
-                try:
-                    if await self.add_track(ctx, track):
-                        queued += 1
-                except Exception as e:
-                    log.error(f"Error queuing track: {e}")
-            
-            await ctx.send(f"Queued {queued}/{total} tracks")
-            
-        except Exception as e:
-            await ctx.send(f"Error: {str(e)}")
-            log.error(f"Playlist error: {e}")
-    
-    async def queue_album(self, ctx, url):
-        """Queue an album."""
-        
-        match = re.search(r"album/([0-9]+)", url)
-        if not match:
-            return await ctx.send("Invalid album URL")
-        
-        album_id = match.group(1)
-        
-        try:
-            album = await self.bot.loop.run_in_executor(
-                None,
-                self.session.album,
-                album_id
-            )
-            
-            tracks = await self.bot.loop.run_in_executor(
-                None,
-                album.tracks
-            )
-            
-            total = len(tracks)
-            await ctx.send(
-                f"Queuing {album.name} by {album.artist.name} ({total} tracks)..."
-            )
-            
-            queued = 0
-            for track in tracks:
-                try:
-                    if await self.add_track(ctx, track):
-                        queued += 1
-                except Exception as e:
-                    log.error(f"Error queuing track: {e}")
-            
-            await ctx.send(f"Queued {queued}/{total} tracks")
-            
-        except Exception as e:
-            await ctx.send(f"Error: {str(e)}")
-            log.error(f"Album error: {e}")
-    
-    async def queue_track(self, ctx, url):
-        """Queue a single track."""
-        
-        match = re.search(r"track/([0-9]+)", url)
-        if not match:
-            return await ctx.send("Invalid track URL")
-        
-        track_id = match.group(1)
-        
-        try:
-            track = await self.bot.loop.run_in_executor(
-                None,
-                self.session.track,
-                track_id
-            )
-            
-            if await self.add_track(ctx, track):
-                await ctx.send(f"Queued: {track.name} by {track.artist.name}")
-            else:
-                await ctx.send(f"Failed to queue: {track.name}")
-                
-        except Exception as e:
-            await ctx.send(f"Error: {str(e)}")
-            log.error(f"Track error: {e}")
-    
-    async def add_track(self, ctx, track):
-        """Add track to Audio queue."""
-        
-        try:
-            query = f"{track.artist.name} - {track.name}"
             play_command = self.bot.get_command("play")
             
             if not play_command:
-                log.error("Play command not found")
-                return False
+                return await ctx.send("Play command not found")
             
-            await ctx.invoke(play_command, query=query)
-            return True
+            # Clean the URL
+            clean_url = url.strip()
+            
+            quiet_mode = await self.config.quiet_mode()
+            
+            # Check if it's a playlist or album (multiple tracks)
+            is_collection = any(x in clean_url for x in ["playlist/", "album/"])
+            
+            if is_collection:
+                # Show initial message for collections
+                loading_msg = await ctx.send("⏳ Loading from Tidal...")
+                
+                # Invoke play command
+                # Temporarily suppress Audio cog messages by invoking without response
+                try:
+                    # Store original channel
+                    original_channel = ctx.channel
+                    
+                    # If quiet mode, we'll let Audio handle it but add summary after
+                    await ctx.invoke(play_command, query=clean_url)
+                    
+                    # Delete loading message
+                    try:
+                        await loading_msg.delete()
+                    except:
+                        pass
+                    
+                    # Send completion message
+                    if quiet_mode:
+                        await ctx.send("✅ Tidal playlist/album queued successfully!")
+                        
+                except Exception as e:
+                    await loading_msg.edit(content=f"Error: {str(e)}")
+            else:
+                # Single track - just invoke normally
+                if quiet_mode:
+                    # For single tracks in quiet mode, let Audio cog handle the message
+                    await ctx.invoke(play_command, query=clean_url)
+                else:
+                    await ctx.send("🎵 Queueing from Tidal...")
+                    await ctx.invoke(play_command, query=clean_url)
             
         except Exception as e:
-            log.error(f"Error adding track: {e}")
-            return False
+            await ctx.send(f"Error: {str(e)}\n\nMake sure LavaSrc plugin is installed on Lavalink!")
+            log.error(f"Direct Tidal error: {e}")
 
 
 async def setup(bot):
