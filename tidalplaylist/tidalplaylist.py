@@ -271,5 +271,6 @@ class TidalPlaylist(commands.Cog):
 
 
 async def setup(bot):
+    """Setup function for Red-DiscordBot."""
     cog = TidalPlaylist(bot)
     await bot.add_cog(cog)
