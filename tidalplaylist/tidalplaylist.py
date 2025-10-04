@@ -49,5 +49,3 @@ class Tidal(commands.Cog):
         for track in playlist.tracks():
             await self._queue_track_obj(ctx, audio_cog, track)
         await ctx.send("Done queueing playlist.")
-
-    asy
