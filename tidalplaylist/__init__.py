@@ -1,4 +1,3 @@
-from .tidalplaylist import TidalPlaylist
+from .tidalplaylist import setup
 
-async def setup(bot):
-    await bot.add_cog(TidalPlaylist(bot))
+__red_end_user_data_statement__ = "This cog does not store user data."
