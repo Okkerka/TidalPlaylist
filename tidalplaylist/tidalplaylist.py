@@ -30,12 +30,15 @@ class TidalPlaylist(commands.Cog):
             "access_token": None,
             "refresh_token": None,
             "expiry_time": None,
-            "quiet_mode": True
+            "quiet_mode": True,
+            "suppress_audio_enqueue": True  # New setting
         }
         self.config.register_global(**default_global)
         
         # Track active queueing tasks
         self.active_tasks = {}
+        # Track if we're currently queueing from Tidal
+        self.is_queueing = {}
         
         if TIDALAPI_AVAILABLE:
             self.session = tidalapi.Session()
@@ -77,6 +80,48 @@ class TidalPlaylist(commands.Cog):
             # Cancel any active Tidal queueing for this guild
             if ctx.guild and ctx.guild.id in self.active_tasks:
                 self.active_tasks[ctx.guild.id] = True  # Signal to stop
+    
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        """Suppress Audio cog's 'Track Enqueued' messages during Tidal queueing."""
+        # Only suppress if we're currently queueing from Tidal
+        if not message.guild or message.guild.id not in self.is_queueing:
+            return
+        
+        # Check if this is from the bot and contains "Track Enqueued"
+        if message.author.id != self.bot.user.id:
+            return
+        
+        suppress_enabled = await self.config.suppress_audio_enqueue()
+        if not suppress_enabled:
+            return
+        
+        # Check if it's an embed with "Track Enqueued"
+        if message.embeds:
+            for embed in message.embeds:
+                if embed.title and "Track Enqueued" in embed.title:
+                    try:
+                        await message.delete()
+                    except:
+                        pass
+                    return
+    
+    @commands.is_owner()
+    @commands.command()
+    async def tidalsuppress(self, ctx, enabled: bool = None):
+        """
+        Toggle suppression of Audio's 'Track Enqueued' messages.
+        
+        When enabled, hides spam during Tidal playlist queueing.
+        """
+        if enabled is None:
+            current = await self.config.suppress_audio_enqueue()
+            status = "enabled" if current else "disabled"
+            return await ctx.send(f"Audio enqueue suppression is **{status}**.")
+        
+        await self.config.suppress_audio_enqueue.set(enabled)
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"Audio enqueue suppression **{status}**.")
     
     @commands.is_owner()
     @commands.command()
@@ -196,6 +241,7 @@ class TidalPlaylist(commands.Cog):
         guild_id = ctx.guild.id if ctx.guild else None
         if guild_id:
             self.active_tasks[guild_id] = False
+            self.is_queueing[guild_id] = True  # Mark as queueing
         
         try:
             loading_msg = await ctx.send("⏳ Loading Tidal playlist...")
@@ -250,8 +296,11 @@ class TidalPlaylist(commands.Cog):
             log.error(f"Playlist error: {e}")
         finally:
             # Clean up task tracking
-            if guild_id and guild_id in self.active_tasks:
-                del self.active_tasks[guild_id]
+            if guild_id:
+                if guild_id in self.active_tasks:
+                    del self.active_tasks[guild_id]
+                if guild_id in self.is_queueing:
+                    del self.is_queueing[guild_id]
     
     async def queue_album(self, ctx, url):
         """Queue an album."""
@@ -266,6 +315,7 @@ class TidalPlaylist(commands.Cog):
         guild_id = ctx.guild.id if ctx.guild else None
         if guild_id:
             self.active_tasks[guild_id] = False
+            self.is_queueing[guild_id] = True  # Mark as queueing
         
         try:
             loading_msg = await ctx.send("⏳ Loading Tidal album...")
@@ -317,8 +367,11 @@ class TidalPlaylist(commands.Cog):
             log.error(f"Album error: {e}")
         finally:
             # Clean up task tracking
-            if guild_id and guild_id in self.active_tasks:
-                del self.active_tasks[guild_id]
+            if guild_id:
+                if guild_id in self.active_tasks:
+                    del self.active_tasks[guild_id]
+                if guild_id in self.is_queueing:
+                    del self.is_queueing[guild_id]
     
     async def queue_track(self, ctx, url):
         """Queue a single track."""
@@ -355,6 +408,12 @@ class TidalPlaylist(commands.Cog):
         mix_id = match.group(1)
         quiet = await self.config.quiet_mode()
         
+        # Mark this guild as having an active task
+        guild_id = ctx.guild.id if ctx.guild else None
+        if guild_id:
+            self.active_tasks[guild_id] = False
+            self.is_queueing[guild_id] = True  # Mark as queueing
+        
         try:
             loading_msg = await ctx.send("⏳ Loading Tidal mix...")
             
@@ -379,6 +438,11 @@ class TidalPlaylist(commands.Cog):
             failed = 0
             
             for i, item in enumerate(items, 1):
+                # Check if we should stop
+                if guild_id and self.active_tasks.get(guild_id, False):
+                    await loading_msg.edit(content=f"⏹️ Queueing stopped. Queued {queued}/{total} tracks.")
+                    return
+                
                 try:
                     if await self.add_track(ctx, item, quiet=quiet):
                         queued += 1
@@ -387,7 +451,7 @@ class TidalPlaylist(commands.Cog):
                     
                     # Update progress every 10 tracks
                     if not quiet and i % 10 == 0:
-                        await loading_msg.edit(content=f"⏳ Queueing... {i}/{total} tracks")
+                        await loading_msg.edit(content=f"⏳ Queueing... {i}/{total} tracks (use `[p]stop` to cancel)")
                         
                 except Exception as e:
                     log.error(f"Error queuing track: {e}")
@@ -402,6 +466,13 @@ class TidalPlaylist(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
             log.error(f"Mix error: {e}")
+        finally:
+            # Clean up task tracking
+            if guild_id:
+                if guild_id in self.active_tasks:
+                    del self.active_tasks[guild_id]
+                if guild_id in self.is_queueing:
+                    del self.is_queueing[guild_id]
     
     async def add_track(self, ctx, track, quiet=True):
         """Add track to queue via YouTube search."""
