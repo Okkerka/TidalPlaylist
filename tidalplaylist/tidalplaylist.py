@@ -137,8 +137,14 @@ class TidalPlaylist(commands.Cog):
     @commands.command()
     async def tidal(self, ctx, url: str):
         """
-        Queue Tidal playlist, album, or track.
+        Queue Tidal playlist, album, track, or mix.
         Works by searching YouTube for each track.
+        
+        Examples:
+        [p]tidal https://tidal.com/browse/playlist/xxxxx
+        [p]tidal https://tidal.com/browse/album/xxxxx
+        [p]tidal https://tidal.com/browse/track/xxxxx
+        [p]tidal https://tidal.com/browse/mix/xxxxx
         """
         if not TIDALAPI_AVAILABLE:
             return await ctx.send("❌ tidalapi not installed. Run: `[p]pipinstall tidalapi`")
@@ -161,8 +167,10 @@ class TidalPlaylist(commands.Cog):
             await self.queue_album(ctx, url)
         elif "track/" in url:
             await self.queue_track(ctx, url)
+        elif "mix/" in url:
+            await self.queue_mix(ctx, url)
         else:
-            await ctx.send("❌ Invalid Tidal URL")
+            await ctx.send("❌ Invalid Tidal URL (playlist, album, track, or mix)")
     
     async def queue_playlist(self, ctx, url):
         """Queue a playlist."""
@@ -298,6 +306,63 @@ class TidalPlaylist(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
             log.error(f"Track error: {e}")
+    
+    async def queue_mix(self, ctx, url):
+        """Queue a Tidal Mix."""
+        match = re.search(r"mix/([A-Za-z0-9]+)", url)
+        if not match:
+            return await ctx.send("❌ Invalid mix URL")
+        
+        mix_id = match.group(1)
+        quiet = await self.config.quiet_mode()
+        
+        try:
+            loading_msg = await ctx.send("⏳ Loading Tidal mix...")
+            
+            mix = await self.bot.loop.run_in_executor(
+                None,
+                self.session.mix,
+                mix_id
+            )
+            
+            # Get mix items (tracks)
+            items = await self.bot.loop.run_in_executor(
+                None,
+                mix.items
+            )
+            
+            total = len(items)
+            
+            if not quiet:
+                await loading_msg.edit(content=f"⏳ Queueing **{mix.title}** ({total} tracks)...")
+            
+            queued = 0
+            failed = 0
+            
+            for i, item in enumerate(items, 1):
+                try:
+                    if await self.add_track(ctx, item, quiet=quiet):
+                        queued += 1
+                    else:
+                        failed += 1
+                    
+                    # Update progress every 10 tracks
+                    if not quiet and i % 10 == 0:
+                        await loading_msg.edit(content=f"⏳ Queueing... {i}/{total} tracks")
+                        
+                except Exception as e:
+                    log.error(f"Error queuing track: {e}")
+                    failed += 1
+            
+            result = f"✅ Queued **{queued}/{total}** tracks from **{mix.title}**"
+            if failed > 0:
+                result += f"\n⚠️ {failed} tracks failed"
+            
+            await loading_msg.edit(content=result)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            log.error(f"Mix error: {e}")
     
     async def add_track(self, ctx, track, quiet=True):
         """Add track to queue via YouTube search."""
