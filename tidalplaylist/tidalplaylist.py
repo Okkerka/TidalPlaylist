@@ -34,6 +34,9 @@ class TidalPlaylist(commands.Cog):
         }
         self.config.register_global(**default_global)
         
+        # Track active queueing tasks
+        self.active_tasks = {}
+        
         if TIDALAPI_AVAILABLE:
             self.session = tidalapi.Session()
             bot.loop.create_task(self.load_session())
@@ -66,6 +69,14 @@ class TidalPlaylist(commands.Cog):
                 log.info("No Tidal credentials found")
         except Exception as e:
             log.error(f"Error loading session: {e}")
+    
+    @commands.Cog.listener()
+    async def on_command(self, ctx):
+        """Listen for stop command to cancel queueing."""
+        if ctx.command and ctx.command.qualified_name == "stop":
+            # Cancel any active Tidal queueing for this guild
+            if ctx.guild and ctx.guild.id in self.active_tasks:
+                self.active_tasks[ctx.guild.id] = True  # Signal to stop
     
     @commands.is_owner()
     @commands.command()
@@ -161,16 +172,16 @@ class TidalPlaylist(commands.Cog):
         if not ctx.author.voice:
             return await ctx.send("❌ Join a voice channel first")
         
-        if "playlist/" in url:
+        if "mix/" in url:
+            await self.queue_mix(ctx, url)
+        elif "playlist/" in url:
             await self.queue_playlist(ctx, url)
         elif "album/" in url:
             await self.queue_album(ctx, url)
         elif "track/" in url:
             await self.queue_track(ctx, url)
-        elif "mix/" in url:
-            await self.queue_mix(ctx, url)
         else:
-            await ctx.send("❌ Invalid Tidal URL (playlist, album, track, or mix)")
+            await ctx.send("❌ Invalid Tidal URL (supports: playlist, album, track, mix)")
     
     async def queue_playlist(self, ctx, url):
         """Queue a playlist."""
@@ -180,6 +191,11 @@ class TidalPlaylist(commands.Cog):
         
         playlist_id = match.group(1)
         quiet = await self.config.quiet_mode()
+        
+        # Mark this guild as having an active task
+        guild_id = ctx.guild.id if ctx.guild else None
+        if guild_id:
+            self.active_tasks[guild_id] = False
         
         try:
             loading_msg = await ctx.send("⏳ Loading Tidal playlist...")
@@ -204,6 +220,11 @@ class TidalPlaylist(commands.Cog):
             failed = 0
             
             for i, track in enumerate(tracks, 1):
+                # Check if we should stop
+                if guild_id and self.active_tasks.get(guild_id, False):
+                    await loading_msg.edit(content=f"⏹️ Queueing stopped. Queued {queued}/{total} tracks.")
+                    return
+                
                 try:
                     if await self.add_track(ctx, track, quiet=quiet):
                         queued += 1
@@ -212,7 +233,7 @@ class TidalPlaylist(commands.Cog):
                     
                     # Update progress every 10 tracks
                     if not quiet and i % 10 == 0:
-                        await loading_msg.edit(content=f"⏳ Queueing... {i}/{total} tracks")
+                        await loading_msg.edit(content=f"⏳ Queueing... {i}/{total} tracks (use `[p]stop` to cancel)")
                         
                 except Exception as e:
                     log.error(f"Error queuing track: {e}")
@@ -227,6 +248,10 @@ class TidalPlaylist(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
             log.error(f"Playlist error: {e}")
+        finally:
+            # Clean up task tracking
+            if guild_id and guild_id in self.active_tasks:
+                del self.active_tasks[guild_id]
     
     async def queue_album(self, ctx, url):
         """Queue an album."""
@@ -236,6 +261,11 @@ class TidalPlaylist(commands.Cog):
         
         album_id = match.group(1)
         quiet = await self.config.quiet_mode()
+        
+        # Mark this guild as having an active task
+        guild_id = ctx.guild.id if ctx.guild else None
+        if guild_id:
+            self.active_tasks[guild_id] = False
         
         try:
             loading_msg = await ctx.send("⏳ Loading Tidal album...")
@@ -261,7 +291,12 @@ class TidalPlaylist(commands.Cog):
             queued = 0
             failed = 0
             
-            for track in tracks:
+            for i, track in enumerate(tracks, 1):
+                # Check if we should stop
+                if guild_id and self.active_tasks.get(guild_id, False):
+                    await loading_msg.edit(content=f"⏹️ Queueing stopped. Queued {queued}/{total} tracks.")
+                    return
+                
                 try:
                     if await self.add_track(ctx, track, quiet=quiet):
                         queued += 1
@@ -280,6 +315,10 @@ class TidalPlaylist(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
             log.error(f"Album error: {e}")
+        finally:
+            # Clean up task tracking
+            if guild_id and guild_id in self.active_tasks:
+                del self.active_tasks[guild_id]
     
     async def queue_track(self, ctx, url):
         """Queue a single track."""
